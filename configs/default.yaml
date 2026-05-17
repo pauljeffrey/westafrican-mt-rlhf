@@ -1,0 +1,6 @@
+# Reference defaults (overridden by .env)
+model_name_or_path: google/gemma-2-2b-it
+reward_model_id: masakhane/africomet-stl
+dataset_id: Aletheia-ng/tds-sft
+max_train_samples: 50000
+max_rl_samples: 10000

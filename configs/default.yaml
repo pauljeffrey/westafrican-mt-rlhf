@@ -1,5 +1,6 @@
 # Reference defaults (overridden by .env)
 model_name_or_path: google/gemma-2-2b-it
+hf_push_repo_id: BeardedMonster/gemma-270m-translate-it
 reward_model_id: masakhane/africomet-stl
 dataset_id: Aletheia-ng/tds-sft
 max_train_samples: 50000

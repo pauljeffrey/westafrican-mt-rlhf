@@ -143,4 +143,11 @@ def train_rlhf() -> str:
     policy.save_pretrained(settings.rl_output_dir)
     tokenizer.save_pretrained(settings.rl_output_dir)
     logger.info("RLHF training complete -> %s", settings.rl_output_dir)
+
+    if settings.hf_push_repo_id:
+        logger.info("Pushing RLHF model to Hub: %s", settings.hf_push_repo_id)
+        policy.push_to_hub(settings.hf_push_repo_id, token=settings.hf_token)
+        tokenizer.push_to_hub(settings.hf_push_repo_id, token=settings.hf_token)
+        logger.info("RLHF model pushed to Hub.")
+
     return settings.rl_output_dir

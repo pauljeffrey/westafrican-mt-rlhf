@@ -58,4 +58,11 @@ def train_sft() -> str:
     trainer.save_model(settings.sft_output_dir)
     tokenizer.save_pretrained(settings.sft_output_dir)
     logger.info("SFT complete.")
+
+    if settings.hf_push_repo_id:
+        logger.info("Pushing SFT model to Hub: %s", settings.hf_push_repo_id)
+        trainer.model.push_to_hub(settings.hf_push_repo_id, token=settings.hf_token)
+        tokenizer.push_to_hub(settings.hf_push_repo_id, token=settings.hf_token)
+        logger.info("SFT model pushed to Hub.")
+
     return settings.sft_output_dir

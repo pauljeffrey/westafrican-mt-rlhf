@@ -7,8 +7,8 @@ trl>=0.9.6
 bitsandbytes>=0.43.0; platform_system != "Darwin"
 unbabel-comet>=2.2.0
 python-dotenv>=1.0.0
-pyyaml>=6.0
 wandb>=0.17.0
 sentencepiece>=0.2.0
 protobuf>=4.25.0
 tqdm>=4.66.0
+sacrebleu>=2.4.0

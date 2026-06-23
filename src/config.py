@@ -21,6 +21,7 @@ def _float(key: str, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     hf_token: str | None = os.getenv("HF_TOKEN") or None
+    hf_push_repo_id: str | None = os.getenv("HF_PUSH_REPO_ID") or None
     model_name: str = os.getenv("MODEL_NAME_OR_PATH", "google/gemma-2-2b-it")
     trust_remote_code: bool = _bool("TRUST_REMOTE_CODE", "false")
 

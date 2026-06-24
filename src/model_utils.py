@@ -3,6 +3,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.config import settings
+from src.distributed import dist_context, is_distributed
 
 
 def load_tokenizer(model_path: str | None = None):
@@ -28,10 +29,15 @@ def load_causal_lm(model_path: str | None = None, *, trainable: bool = True):
         "token": settings.hf_token,
         "torch_dtype": _dtype(),
     }
-    if torch.cuda.is_available():
+
+    if is_distributed():
+        # FSDP/TP owns device placement; avoid device_map="auto".
+        kwargs["low_cpu_mem_usage"] = True
+    elif torch.cuda.is_available():
         kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+
     if settings.use_lora and trainable:
         model = get_peft_model(
             model,
@@ -43,11 +49,16 @@ def load_causal_lm(model_path: str | None = None, *, trainable: bool = True):
                 task_type="CAUSAL_LM",
             ),
         )
+
     if trainable:
         model.train()
     else:
         model.eval()
         for p in model.parameters():
             p.requires_grad = False
-    return model
 
+    if is_distributed():
+        ctx = dist_context()
+        model.to(ctx.device)
+
+    return model

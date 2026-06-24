@@ -76,5 +76,12 @@ class Settings:
     rl_top_p: float = _float("RL_TOP_P", 0.9)
     rl_reward_normalize: bool = _bool("RL_REWARD_NORMALIZE", "true")
 
+    # Distributed training (FSDP + optional tensor parallelism)
+    fsdp_enabled: bool = _bool("FSDP_ENABLED", "false")
+    fsdp_tp_size: int = _int("FSDP_TP_SIZE", 1)
+    fsdp_sharding: str = os.getenv("FSDP_SHARDING", "FULL_SHARD")
+    fsdp_cpu_offload: bool = _bool("FSDP_CPU_OFFLOAD", "false")
+    fsdp_transformer_layer_cls: str = os.getenv("FSDP_TRANSFORMER_LAYER_CLS", "")
+
 
 settings = Settings()

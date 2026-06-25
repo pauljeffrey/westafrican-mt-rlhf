@@ -17,9 +17,9 @@ from src.rlhf_train import train_rlhf
 def main() -> None:
     logging.basicConfig(level=settings.log_level)
     world = int(os.environ.get("WORLD_SIZE", "1"))
-    if world > 1 and not settings.fsdp_enabled:
-        raise SystemExit("Multi-GPU launch requires FSDP_ENABLED=true in .env")
-    setup_distributed(tp_size=settings.fsdp_tp_size if settings.fsdp_enabled else 1)
+    if world > 1 and settings.dist_strategy not in ("ddp", "fsdp"):
+        raise SystemExit("Multi-GPU launch requires DIST_STRATEGY=ddp or fsdp in .env")
+    setup_distributed(strategy=settings.dist_strategy)
     try:
         train_rlhf()
     finally:

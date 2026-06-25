@@ -1,5 +1,6 @@
 import logging
 import os
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -10,15 +11,15 @@ from transformers import get_linear_schedule_with_warmup
 from src.config import settings
 from src.data import prepare_rl_dataset
 from src.distributed import (
-    apply_tensor_parallel,
     broadcast_tensor,
+    clip_grad_norm,
     dist_context,
     distributed_dataloader,
     is_distributed,
     push_to_hub,
-    save_fsdp_model,
+    save_model,
     summon_full_params,
-    wrap_fsdp,
+    wrap_model,
 )
 from src.model_utils import load_causal_lm, load_tokenizer
 from src.prompts import extract_translation
@@ -38,6 +39,20 @@ def _sequence_logprobs(logits: torch.Tensor, labels: torch.Tensor, mask: torch.T
 def _forward_logprobs(model, input_ids: torch.Tensor, attention_mask: torch.Tensor, gen_mask: torch.Tensor):
     outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     return _sequence_logprobs(outputs.logits, input_ids, gen_mask)
+
+
+def _wrap_reference(model: torch.nn.Module) -> torch.nn.Module:
+    """Policy is wrapped for training; reference is FSDP-wrapped only under fsdp strategy."""
+    ctx = dist_context()
+    if not ctx.enabled or ctx.strategy != "fsdp":
+        return model
+    return wrap_model(
+        model,
+        use_bf16=settings.rl_bf16,
+        sharding=settings.fsdp_sharding,
+        cpu_offload=settings.fsdp_cpu_offload,
+        use_orig_params=False,
+    )
 
 
 def train_rlhf() -> str:
@@ -64,24 +79,14 @@ def train_rlhf() -> str:
     policy = load_causal_lm(policy_path)
     reference = load_causal_lm(policy_path, trainable=False)
 
-    if settings.fsdp_enabled and is_distributed():
-        if ctx.tp_size > 1:
-            policy = apply_tensor_parallel(policy)
-            reference = apply_tensor_parallel(reference)
-        policy = wrap_fsdp(
-            policy,
-            sharding=settings.fsdp_sharding,
-            use_bf16=settings.rl_bf16,
-            cpu_offload=settings.fsdp_cpu_offload,
-            use_orig_params=settings.use_lora,
-        )
-        reference = wrap_fsdp(
-            reference,
-            sharding=settings.fsdp_sharding,
-            use_bf16=settings.rl_bf16,
-            cpu_offload=settings.fsdp_cpu_offload,
-            use_orig_params=False,
-        )
+    policy = wrap_model(
+        policy,
+        use_bf16=settings.rl_bf16,
+        sharding=settings.fsdp_sharding,
+        cpu_offload=settings.fsdp_cpu_offload,
+        use_orig_params=settings.use_lora,
+    )
+    reference = _wrap_reference(reference)
 
     reward_model = AfricometReward() if (ctx.is_main or not ctx.enabled) else None
     device = ctx.device
@@ -91,8 +96,7 @@ def train_rlhf() -> str:
         lr=settings.rl_learning_rate,
     )
 
-    steps_per_epoch = len(dataloader)
-    total_steps = min(settings.rl_max_steps, steps_per_epoch * settings.rl_num_epochs)
+    total_steps = min(settings.rl_max_steps, len(dataloader) * settings.rl_num_epochs)
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=max(1, total_steps // 10),
@@ -101,6 +105,7 @@ def train_rlhf() -> str:
 
     global_step = 0
     policy.train()
+    use_summon = isinstance(policy, FSDP)
 
     for epoch in range(settings.rl_num_epochs):
         if is_distributed():
@@ -127,7 +132,8 @@ def train_rlhf() -> str:
                 max_length=settings.max_prompt_len,
             ).to(device)
 
-            with torch.no_grad(), summon_full_params(policy):
+            gen_ctx = summon_full_params(policy) if use_summon else nullcontext()
+            with torch.no_grad(), gen_ctx:
                 generated = policy.generate(
                     **prompts,
                     max_new_tokens=settings.max_new_tokens,
@@ -169,10 +175,7 @@ def train_rlhf() -> str:
             loss.backward()
 
             if (global_step + 1) % settings.rl_grad_accum == 0:
-                if isinstance(policy, FSDP):
-                    policy.clip_grad_norm_(1.0)
-                else:
-                    torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+                clip_grad_norm(policy, 1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -188,7 +191,7 @@ def train_rlhf() -> str:
         if global_step >= settings.rl_max_steps:
             break
 
-    save_fsdp_model(policy, settings.rl_output_dir, tokenizer)
+    save_model(policy, settings.rl_output_dir, tokenizer)
     if ctx.is_main:
         logger.info("RLHF training complete -> %s", settings.rl_output_dir)
 

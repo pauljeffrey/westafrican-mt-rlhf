@@ -5,6 +5,5 @@ reward_model_id: masakhane/africomet-stl
 dataset_id: Aletheia-ng/tds-sft
 max_train_samples: 50000
 max_rl_samples: 10000
-fsdp_enabled: false
-fsdp_tp_size: 1
+dist_strategy: none
 fsdp_sharding: FULL_SHARD

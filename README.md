@@ -1,11 +1,11 @@
 # West African Machine Translation with AfriCOMET-Guided RLHF
 
-**A distributed fine-tuning pipeline for low-resource West African languages using supervised fine-tuning (SFT), reinforcement learning from human feedback (RLHF), and Fully Sharded Data Parallel (FSDP) training.**
+**A distributed fine-tuning pipeline for low-resource West African languages using supervised fine-tuning (SFT), reinforcement learning from human feedback (RLHF), and Fully Sharded Data Parallel (FSDP) training. Work is still ongoing.**
 
 | | |
 |---|---|
-| **Base model** | `google/gemma-2-2b-it` (configurable) |
-| **Published checkpoint** | [`BeardedMonster/gemma-270m-translate-it`](https://huggingface.co/BeardedMonster/gemma-270m-translate-it) |
+| **Base model** | [`google/gemma-3-270m-it`](https://huggingface.co/google/gemma-3-270m-it) |
+| **Published checkpoint** | [`BeardedMonster/gemma-3-270m-translate-it`](https://huggingface.co/BeardedMonster/gemma-3-270m-translate-it) |
 | **Training data** | [`Aletheia-ng/tds-sft`](https://huggingface.co/datasets/Aletheia-ng/tds-sft) |
 | **Reward model** | [`masakhane/africomet-stl`](https://huggingface.co/masakhane/africomet-stl) |
 | **Evaluation benchmark** | [`masakhane/mafand`](https://huggingface.co/datasets/masakhane/mafand) (validation split) |
@@ -18,15 +18,12 @@
 1. [Problem Statement](#1-problem-statement)
 2. [Decision and Design Choices](#2-decision-and-design-choices)
 3. [Architectural Choices](#3-architectural-choices)
-4. [Engineering Bottlenecks](#4-engineering-bottlenecks)
-5. [Trade-offs](#5-trade-offs)
-6. [Evaluation](#6-evaluation)
-7. [Edge Cases and Considerations](#7-edge-cases-and-considerations)
-8. [Related Academic Work](#8-related-academic-work)
-9. [Quick Start](#9-quick-start)
-10. [Distributed Training (FSDP)](#10-distributed-training-fsdp)
-11. [Project Layout](#11-project-layout)
-12. [Deployment](#12-deployment)
+4. [Evaluation](#4-evaluation)
+5. [Related Academic Work](#5-related-academic-work)
+6. [Quick Start](#6-quick-start)
+7. [Distributed Training (FSDP)](#7-distributed-training-fsdp)
+8. [Project Layout](#8-project-layout)
+9. [Tech Stack](#9-tech-stack)
 
 ---
 
@@ -34,18 +31,18 @@
 
 Machine translation for **West African languages** remains severely under-served relative to high-resource pairs (e.g., en–de, en–fr). Three compounding factors drive this gap:
 
-1. **Data scarcity** — Parallel corpora for Hausa, Igbo, Yoruba, Wolof, and related languages are orders of magnitude smaller than for European or East Asian languages. General-purpose LLMs exhibit high perplexity and poor COMET scores on these pairs despite strong English performance.
+1. **Data scarcity** — Parallel corpora for Hausa, Igbo, Yoruba, Wolof, and related languages are orders of magnitude smaller than for European or East Asian languages. General-purpose LLMs exhibit high perplexity and suboptimal COMET scores on these pairs despite strong English performance.
 
 2. **Evaluation mismatch** — Standard MT metrics (BLEU, chrF) correlate imperfectly with human judgments on morphologically rich, low-resource African languages. Generic COMET models trained predominantly on European data underperform on these language families.
 
-3. **Compute constraints** — Fine-tuning even a 2B-parameter instruction-tuned model on millions of translation examples requires multi-GPU infrastructure that most research groups and practitioners in the region lack access to.
+3. **Compute constraints** — Large-scale SFT over millions of translation examples and RLHF with per-step AfriCOMET scoring remain expensive even with a compact base model. We use **Gemma 3 270M** (~270M parameters, ~540 MB in bf16) so full fine-tuning fits on a single consumer GPU, while **FSDP** scales throughput and effective batch size across multiple devices when needed.
 
 **This project addresses all three concerns** by:
 
-- Fine-tuning an instruction-tuned causal LM on `Aletheia-ng/tds-sft`, a large-scale West African translation SFT dataset (~11M instruction–input–response triples).
+- Fine-tuning **[Gemma 3 270M IT](https://huggingface.co/google/gemma-3-270m-it)** on [`Aletheia-ng/tds-sft`](https://huggingface.co/datasets/Aletheia-ng/tds-sft), a large-scale West African translation SFT dataset (~11M instruction–input–response triples).
 - Applying a lightweight **REINFORCE-style RLHF stage** with **AfriCOMET** — a COMET variant trained specifically on African languages — as the reward signal.
-- Providing **FSDP + optional tensor parallelism** so the same pipeline scales from a single GPU (with LoRA) to multi-node clusters without code changes.
-- Shipping a ** reproducible evaluation harness** against the MaFAND benchmark and a public demo (Vercel frontend + Modal backend).
+- Providing **FSDP + optional tensor parallelism** so the same pipeline scales from a single GPU (full fine-tune of 270M) to multi-node clusters without code changes.
+- Shipping a **reproducible evaluation harness** against the [MaFAND](https://huggingface.co/datasets/masakhane/mafand) benchmark and a public demo (Vercel frontend + Modal backend).
 
 ---
 
@@ -58,16 +55,16 @@ We adopt **SFT → RLHF** rather than pure RL from a base checkpoint:
 | Rationale | Detail |
 |-----------|--------|
 | Sample efficiency | SFT establishes a reasonable translation prior in ~1 epoch, reducing the RL exploration space. |
-| Stability | Policy-gradient RL from a cold-start base model on low-resource MT produces high-variance, often degenerate outputs. |
+| Stability | Policy-gradient RL from a cold-start base model on low-resource MT may produce high-variance, often degenerate outputs. |
 | Modularity | SFT and RL checkpoints can be evaluated independently; RL can be skipped if compute is limited. |
 
 ### 2.2 AfriCOMET as a black-box reward
 
-We use **AfriCOMET** (`masakhane/africomet-stl`) as a non-differentiable reward rather than training a separate reward head or using DPO/IPO:
+We use **AfriCOMET** ([`masakhane/africomet-stl`](https://huggingface.co/masakhane/africomet-stl)) as a non-differentiable reward rather than training a separate reward head or using DPO/IPO:
 
 - AfriCOMET is **pre-trained on African language pairs** and correlates better with human judgments than generic COMET-XL on Hausa, Igbo, and Yoruba.
 - A black-box scorer avoids backpropagating through the COMET encoder, simplifying the RL loop and decoupling reward-model versioning from policy training.
-- The trade-off is higher per-step latency (CPU/GPU COMET inference) — mitigated by batching and rank-0-only scoring in distributed mode.
+- The trade-off is higher per-step latency (CPU/GPU COMET inference) mitigated by batching and rank-0-only scoring in distributed mode.
 
 ### 2.3 REINFORCE + KL penalty over PPO
 
@@ -81,15 +78,31 @@ where $r$ is the (optionally z-score normalized) AfriCOMET score, $\pi_{\mathrm{
 
 Translation quality is sensitive to prompt formatting. We train only on tokens **after** `### Translation:\n` using TRL's `DataCollatorForCompletionOnlyLM`, preventing the model from wasting capacity re-learning the instruction template.
 
-### 2.5 FSDP over DDP for multi-GPU training
+### 2.5 Gemma 3 270M as the base model
 
-**Fully Sharded Data Parallel (FSDP)** shards model parameters, gradients, and optimizer states across GPUs — enabling larger effective batch sizes and models that do not fit on a single device. We chose FSDP over vanilla DDP because:
+We use **[google/gemma-3-270m-it](https://huggingface.co/google/gemma-3-270m-it)** — Google's compact instruction-tuned Gemma 3 variant designed for task-specific fine-tuning:
 
-- Gemma-2-2B in bf16 requires ~4 GB per replica; FSDP reduces per-GPU memory to ~1 GB + activations at 4-way shard.
+| Property | Value |
+|----------|-------|
+| Total parameters | ~270M (170M embedding + ~100M transformer blocks) |
+| Architecture | 18 layers, hidden size 640, 262K vocabulary, 32K context |
+| Base (pretrained) | [`google/gemma-3-270m`](https://huggingface.co/google/gemma-3-270m) |
+| bf16 weight memory | ~540 MB |
+| Typical full fine-tune (1× GPU) | ~2–4 GB peak VRAM (batch 4, seq ~768) |
+| Typical inference | < 1 GB VRAM |
+
+The large vocabulary (262K tokens) helps rare and language-specific tokens — relevant for West African scripts and transliterations — while keeping the transformer stack small enough for accessible training hardware.
+
+### 2.6 FSDP over DDP for multi-GPU training
+
+**Fully Sharded Data Parallel (FSDP)** shards model parameters, gradients, and optimizer states across GPUs. For Gemma 3 270M, single-GPU full fine-tuning is already feasible; FSDP is primarily used for **throughput scaling** and **larger effective batch sizes**, not because the model fails to fit in memory:
+
+- Gemma 3 270M in bf16: **~540 MB** per full replica.
+- FSDP 4-way shard: **~135 MB** parameters per GPU (+ activations).
 - FSDP integrates natively with HuggingFace `Trainer` / TRL `SFTTrainer`.
-- Optional **tensor parallelism** (`FSDP_TP_SIZE > 1`) splits individual linear layers across GPUs within a node, further reducing per-device memory for long sequences.
+- Optional **tensor parallelism** (`FSDP_TP_SIZE > 1`) splits linear layers across GPUs; auto-wrap uses `Gemma3DecoderLayer`.
 
-### 2.6 Environment-driven configuration
+### 2.7 Environment-driven configuration
 
 All hyperparameters live in `.env` → `src/config.py`. No YAML loader in the training path — single source of truth, easy to override in CI/cluster job definitions.
 
@@ -109,12 +122,12 @@ All hyperparameters live in `.env` → `src/config.py`. No YAML loader in the tr
 │              AfriCOMET reward ◄──  RLHF (REINFORCE + FSDP)         │
 │                                      │                              │
 │                                      ▼                              │
-│                          BeardedMonster/gemma-270m-translate-it     │
+│                          BeardedMonster/gemma-3-270m-translate-it   │
 └─────────────────────────────────────────────────────────────────────┘
          │                                    │
          ▼                                    ▼
-  scripts/eval.py                      backend/ (Modal GPU)
-  masakhane/mafand                     frontend/ (Vercel UI)
+  scripts/eval.py                      app/backend/ (Modal GPU)
+  masakhane/mafand                     app/frontend/ (Vercel UI)
   BLEU · chrF · AfriCOMET
 ```
 
@@ -133,86 +146,17 @@ All hyperparameters live in `.env` → `src/config.py`. No YAML loader in the tr
 | `src/inference.py` | Single-sentence greedy decode |
 | `scripts/` | Thin CLI entry points (`run_sft`, `run_rlhf`, `eval`, `translate`) |
 
-### 3.3 Distributed architecture
-
-```
-                    torchrun --nproc_per_node=N
-                              │
-              ┌───────────────┴───────────────┐
-              │     setup_distributed()       │
-              │  WORLD_SIZE=N, TP_SIZE=T      │
-              │  DP_SIZE = N / T              │
-              └───────────────┬───────────────┘
-                              │
-         ┌────────────────────┼────────────────────┐
-         │                    │                    │
-    DeviceMesh           DeviceMesh           DeviceMesh
-    (dp=4, tp=2)         rank 0..7            ...
-         │                    │
-    apply_tensor_parallel   wrap_fsdp (policy)
-    (attention/MLP shards)  wrap_fsdp (reference, frozen)
-         │                    │
-    FSDP shard on dp dim   DistributedSampler (data parallel)
-```
-
-**Key invariant:** `WORLD_SIZE` must be divisible by `FSDP_TP_SIZE`. Each tensor-parallel group shares layers; each data-parallel group receives a disjoint batch shard.
-
-### 3.4 Prompt contract
-
-All training, inference, and evaluation share one template:
-
-```
-### Instruction:
-Translate the sentence below to Hausa:
-
-### Source:
-The meeting was held on Friday.
-
-### Translation:
-```
-
-The model generates tokens after `### Translation:`. SFT loss is masked to the completion; inference strips the prompt prefix.
-
 ---
 
-## 4. Engineering Bottlenecks
+## 4. Evaluation
 
-| Bottleneck | Where it appears | Mitigation in this repo |
-|------------|------------------|-------------------------|
-| **Dataset size (~11M rows)** | SFT data loading | Streaming (`DATASET_STREAMING=true`) + `MAX_TRAIN_SAMPLES` cap |
-| **AfriCOMET inference latency** | RLHF inner loop | Batch scoring (`REWARD_BATCH_SIZE`); rank-0-only scoring + `broadcast_tensor` under FSDP |
-| **FSDP `generate()` overhead** | RLHF sampling step | `summon_full_params` context — trades memory for correct autoregressive decoding |
-| **Checkpoint gather** | End of training / Hub push | `FullStateDictConfig(rank0_only=True)` — all ranks participate, only rank 0 writes |
-| **Cold start (Modal backend)** | Demo API | Container idle timeout (5 min); optional `keep_warm=1` |
-| **Gemma license gating** | Model download | Requires accepted HF license + `HF_TOKEN` |
-| **Reward–policy device mismatch** | Multi-GPU RL | AfriCOMET on `REWARD_GPUS`; rewards broadcast to all policy ranks |
-
----
-
-## 5. Trade-offs
-
-| Choice | Benefit | Cost |
-|--------|---------|------|
-| REINFORCE vs PPO | Simple, debuggable, no value head | Higher gradient variance; slower convergence |
-| AfriCOMET black-box vs differentiable reward | Correct African-language metric; easy to swap versions | ~100–300 ms/batch scoring overhead |
-| FSDP vs LoRA-only | Full-weight updates; multi-GPU scale | Requires `torchrun`; more complex checkpointing |
-| LoRA + FSDP (`use_orig_params=True`) | Train 2B model on consumer GPUs | Slightly lower throughput vs full fine-tune |
-| Streaming dataset | No 11M-row local download | Non-deterministic epoch boundaries when capped |
-| Completion-only SFT loss | Better translation quality per step | Requires exact prompt template match at inference |
-| Z-score reward normalization | Stabilizes RL across batches | Distorts absolute reward scale; batch-size dependent |
-| Single published checkpoint | Simple demo/deploy story | SFT-only vs RLHF quality difference not exposed in UI |
-
----
-
-## 6. Evaluation
-
-### 6.1 Benchmark
+### 4.1 Benchmark
 
 We evaluate on **[MaFAND](https://huggingface.co/datasets/masakhane/mafand)** (`validation` split) — a multi-way parallel corpus covering English ↔ African languages with professional translations.
 
 Default language pairs: `en-hau`, `en-ibo`, `en-yor`, `en-wol`, `en-ewe`, `en-fon`, `en-twi`.
 
-### 6.2 Metrics
+### 4.2 Metrics
 
 | Metric | Purpose |
 |--------|---------|
@@ -220,7 +164,7 @@ Default language pairs: `en-hau`, `en-ibo`, `en-yor`, `en-wol`, `en-ewe`, `en-fo
 | **chrF** | Character n-gram F-score; more robust for morphologically rich languages |
 | **AfriCOMET** | Learned metric trained on African languages; optional (`--use-africomet`) |
 
-### 6.3 Running evaluation
+### 4.3 Running evaluation
 
 ```bash
 # Full benchmark (7 language pairs)
@@ -237,7 +181,7 @@ python scripts/eval.py \
 python scripts/eval.py --model-path ./outputs/sft --max-samples 100
 ```
 
-### 6.4 Recommended reporting
+### 4.4 Recommended reporting
 
 For reproducible results, report:
 
@@ -248,36 +192,7 @@ For reproducible results, report:
 
 ---
 
-## 7. Edge Cases and Considerations
-
-### Training
-
-- **`FSDP_ENABLED=true` without `torchrun`** — Falls back to single-process mode; FSDP config is not applied. Always launch with `torchrun --nproc_per_node=N`.
-- **`WORLD_SIZE % FSDP_TP_SIZE ≠ 0`** — Raises at startup. Example: 8 GPUs with `FSDP_TP_SIZE=2` → 4 data-parallel groups of 2 tensor-parallel ranks.
-- **LoRA + FSDP** — Set `USE_LORA=true`; FSDP uses `use_orig_params=True` automatically.
-- **Missing SFT checkpoint for RL** — `train_rlhf()` raises `FileNotFoundError` with an actionable message.
-- **Empty translation after RL** — Usually indicates prompt template mismatch; verify `### Translation:\n` suffix in `src/prompts.py`.
-- **AfriCOMET language coverage** — AfriCOMET-STL covers ~20 languages. Pairs outside its training distribution may receive miscalibrated scores; use `masakhane/africomet-stl-1.1` for broader coverage.
-
-### Distributed RLHF
-
-- **Reward scoring on rank 0 only** — Non-main ranks receive broadcast reward tensors; policy gradients remain consistent across ranks.
-- **`summon_full_params` during generate** — Required for FSDP-wrapped models; increases peak memory during the sampling phase.
-- **Hub push under FSDP** — All ranks participate in weight gather; only rank 0 uploads (see `push_to_hub`).
-
-### Inference / Demo
-
-- **Modal cold start** — First request after idle may take 30–60 s while the model downloads and loads.
-- **Frontend without `NEXT_PUBLIC_API_URL`** — Returns a configuration error, not a silent failure.
-
-### Data
-
-- **Instruction field variance in tds-sft** — Some rows use free-form instructions; the model learns to follow varied phrasings. Evaluation uses a fixed instruction template per language.
-- **Code-switching in source text** — Common in West African social media text; not explicitly filtered.
-
----
-
-## 8. Related Academic Work
+## 5. Related Academic Work
 
 This project builds on and connects to the following research lines:
 
@@ -285,8 +200,6 @@ This project builds on and connects to the following research lines:
 
 - **Masakhane** — Pan-African NLP community; MaFAND benchmark and AfriCOMET metric.  
   *Dossou et al., "AfriCOMET: Automatic Evaluation of Machine Translation for African Languages"*
-- **TDS-SFT dataset** — Large-scale instruction SFT corpus for African languages.  
-  [`Aletheia-ng/tds-sft`](https://huggingface.co/datasets/Aletheia-ng/tds-sft)
 
 ### Metric-based MT evaluation
 
@@ -305,19 +218,18 @@ This project builds on and connects to the following research lines:
 
 - **FSDP** — Fully Sharded Data Parallel; parameter sharding across GPUs.  
   *Zhao et al., "PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel" (VLDB 2023)*
-- **Tensor parallelism** — Layer-wise split of weight matrices.  
-  *Shoeybi et al., "Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism" (2019)*
+- **Tensor parallelism** — Layer-wise split of weight matrices.
 
 ### Base model
 
-- **Gemma 2** — Google's open instruction-tuned family.  
-  *Gemma Team, "Gemma 2: Improving Open Language Models at a Practical Size" (2024)*
+- **Gemma 3 270M** — Compact instruction-tuned model for efficient task-specific fine-tuning.  
+  *Google DeepMind, [Gemma 3 270M](https://huggingface.co/google/gemma-3-270m-it) · [Developers Blog](https://developers.googleblog.com/en/introducing-gemma-3-270m/)*
 
 ---
 
-## 9. Quick Start
+## 6. Quick Start
 
-### 9.1 Install
+### 6.1 Install
 
 ```bash
 git clone <repo-url> west-african-mt-rlhf
@@ -329,9 +241,9 @@ pip install -r requirements.txt
 cp .env.example .env             # set HF_TOKEN, adjust paths
 ```
 
-Accept the Gemma license on Hugging Face before downloading `google/gemma-2-2b-it`.
+### 6.2 Launch commands
 
-### 9.2 Single-GPU training
+#### Single-GPU training
 
 ```bash
 # Stage 1 — SFT
@@ -346,39 +258,14 @@ python scripts/translate.py \
   --input "The market opens early every morning."
 ```
 
-### 9.3 Configuration reference
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `HF_TOKEN` | — | Hugging Face API token |
-| `HF_PUSH_REPO_ID` | `BeardedMonster/gemma-270m-translate-it` | Push checkpoint after training |
-| `MODEL_NAME_OR_PATH` | `google/gemma-2-2b-it` | Base causal LM |
-| `MAX_TRAIN_SAMPLES` | `50000` | Cap SFT examples |
-| `MAX_RL_SAMPLES` | `10000` | Cap RL examples |
-| `USE_LORA` | `false` | LoRA adapters (single-GPU friendly) |
-| `FSDP_ENABLED` | `false` | Enable multi-GPU FSDP |
-| `FSDP_TP_SIZE` | `1` | Tensor parallel degree |
-| `FSDP_SHARDING` | `FULL_SHARD` | `FULL_SHARD`, `HYBRID_SHARD`, `SHARD_GRAD_OP` |
-| `RL_KL_COEF` | `0.1` | KL penalty weight |
-
----
-
-## 10. Distributed Training (FSDP)
-
-### 10.1 Enable in `.env`
-
-```env
-FSDP_ENABLED=true
-FSDP_TP_SIZE=1          # set to 2 for tensor parallelism within a node
-FSDP_SHARDING=FULL_SHARD
-FSDP_CPU_OFFLOAD=false
-# FSDP_TRANSFORMER_LAYER_CLS=GemmaDecoderLayer   # auto-detected if blank
-```
-
-### 10.2 Launch commands
+#### Multi-GPU training
 
 ```bash
-# 4-GPU data parallel (FSDP full shard)
+# 2-GPU data parallel (throughput scaling; 270M fits on 1 GPU)
+torchrun --nproc_per_node=2 scripts/run_sft.py
+torchrun --nproc_per_node=2 scripts/run_rlhf.py
+
+# 4-GPU FSDP full shard (larger effective batch)
 torchrun --nproc_per_node=4 scripts/run_sft.py
 torchrun --nproc_per_node=4 scripts/run_rlhf.py
 
@@ -387,7 +274,11 @@ torchrun --nproc_per_node=4 scripts/run_rlhf.py
 torchrun --nproc_per_node=8 scripts/run_sft.py
 ```
 
-### 10.3 Sharding strategies
+---
+
+## 7. Distributed Training (FSDP)
+
+### 7.1 Sharding strategies
 
 | Strategy | Behavior | When to use |
 |----------|----------|-------------|
@@ -395,25 +286,9 @@ torchrun --nproc_per_node=8 scripts/run_sft.py
 | `HYBRID_SHARD` | Full shard intra-node, replicate inter-node | Multi-node clusters |
 | `SHARD_GRAD_OP` | Shard grads/optimizer only | When params fit per-GPU but grads don't |
 
-### 10.4 How it works (implementation)
-
-All distributed logic lives in **`src/distributed.py`** — a single module reused by both training stages:
-
-```
-setup_distributed()     → init process group, build DeviceMesh (dp × tp)
-apply_tensor_parallel() → shard linear layers on tp mesh (if TP > 1)
-wrap_fsdp()             → FSDP auto-wrap per transformer layer (RLHF)
-fsdp_trainer_config()   → HuggingFace Trainer FSDP kwargs (SFT)
-summon_full_params()    → safe generate() under FSDP (RLHF)
-save_fsdp_model()       → rank-0 full state dict gather
-broadcast_tensor()      → sync AfriCOMET rewards across ranks
-```
-
-SFT delegates FSDP wrapping to TRL `SFTTrainer`. RLHF wraps policy and reference models explicitly and uses `DistributedSampler` for data parallelism.
-
 ---
 
-## 11. Project Layout
+## 8. Project Layout
 
 ```
 west-african-mt-rlhf/
@@ -436,55 +311,22 @@ west-african-mt-rlhf/
 │   ├── rlhf_train.py             # RLHF training
 │   ├── reward.py                 # AfriCOMET wrapper
 │   └── inference.py              # generation helper
-├── backend/                      # Modal serverless GPU API
-└── frontend/                     # Next.js demo (Vercel)
+├── app/
+│   ├── backend/                  # Modal serverless GPU API
+│   └── frontend/                 # Next.js demo (Vercel)
 ```
 
 ---
 
-## 12. Deployment
-
-### Backend — Modal
-
-```bash
-cd backend && pip install -r requirements.txt
-modal setup
-modal deploy backend/app.py    # copy the printed URL
-```
-
-Serves `BeardedMonster/gemma-270m-translate-it` on a T4 GPU. See `backend/README.md`.
-
-### Frontend — Vercel
-
-```bash
-cd frontend && npm install
-cp .env.local.example .env.local   # set NEXT_PUBLIC_API_URL
-npm run dev                        # http://localhost:3000
-```
-
-Set `NEXT_PUBLIC_API_URL` in Vercel project settings, root directory `frontend/`.
-
----
-
-## Tech Stack
+## 9. Tech Stack
 
 | Library | Role |
 |---------|------|
 | PyTorch ≥ 2.1 | Training, FSDP, generation |
-| Transformers ≥ 4.44 | Causal LM, tokenizer, TP integration |
+| Transformers ≥ 4.50 | Causal LM (Gemma 3), tokenizer, TP integration |
 | TRL ≥ 0.9.6 | `SFTTrainer`, completion-only collator |
 | PEFT ≥ 0.12 | Optional LoRA |
 | unbabel-comet ≥ 2.2 | AfriCOMET reward |
 | sacrebleu ≥ 2.4 | BLEU / chrF evaluation |
 | Datasets ≥ 2.19 | HF streaming |
 | Accelerate ≥ 0.33 | Mixed precision, FSDP trainer backend |
-
----
-
-## License and Attribution
-
-- **Gemma 2** — subject to [Google Gemma license](https://ai.google.dev/gemma/terms).
-- **AfriCOMET / MaFAND** — Masakhane community resources; cite accordingly in academic use.
-- **tds-sft** — Aletheia-ng dataset; verify license before redistribution.
-
-When using this work academically, please cite the Masakhane, COMET/AfriCOMET, and Gemma papers listed in [Section 8](#8-related-academic-work).

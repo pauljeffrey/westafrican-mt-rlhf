@@ -222,7 +222,7 @@ def fsdp_trainer_config(
     cpu_offload: bool = False,
 ) -> tuple[str, dict]:
     """Return (fsdp_flag, fsdp_config) for HuggingFace/TRL TrainingArguments."""
-    layer = layer_cls_name or os.getenv("FSDP_TRANSFORMER_LAYER_CLS", "GemmaDecoderLayer")
+    layer = layer_cls_name or os.getenv("FSDP_TRANSFORMER_LAYER_CLS", "Gemma3DecoderLayer")
     fsdp_flag = "full_shard auto_wrap"
     if cpu_offload:
         fsdp_flag += " offload"

@@ -1,6 +1,6 @@
 # Backend — Modal Serverless Inference
 
-Serves `BeardedMonster/gemma-270m-translate-it` on a T4 GPU via [Modal](https://modal.com). The container idles for 5 minutes after the last request and spins back up on demand.
+Serves `BeardedMonster/gemma-3-270m-translate-it` on a T4 GPU via [Modal](https://modal.com). The container idles for 5 minutes after the last request and spins back up on demand.
 
 ## API
 

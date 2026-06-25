@@ -23,7 +23,7 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         "torch==2.3.1",
-        "transformers>=4.44.0",
+        "transformers>=4.50.0",
         "accelerate>=0.33.0",
         "sentencepiece>=0.2.0",
         "protobuf>=4.25.0",
@@ -34,7 +34,7 @@ image = (
 # Constants
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "BeardedMonster/gemma-270m-translate-it"
+MODEL_ID = "BeardedMonster/gemma-3-270m-translate-it"
 
 SUPPORTED_LANGS: dict[str, str] = {
     "hau": "Hausa",

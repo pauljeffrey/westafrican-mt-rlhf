@@ -188,12 +188,12 @@ export default function Home() {
                 West African Translator
               </h1>
               <p className="text-green-200 text-xs mt-0.5">
-                Powered by <span className="font-semibold">BeardedMonster/gemma-270m-translate-it</span>
+                Powered by <span className="font-semibold">BeardedMonster/gemma-3-270m-translate-it</span>
               </p>
             </div>
           </div>
           <a
-            href="https://huggingface.co/BeardedMonster/gemma-270m-translate-it"
+            href="https://huggingface.co/BeardedMonster/gemma-3-270m-translate-it"
             target="_blank"
             rel="noopener noreferrer"
             className="hidden sm:flex items-center gap-2 text-xs text-green-200 hover:text-white
@@ -363,7 +363,7 @@ export default function Home() {
               GitHub
             </a>
             <a
-              href="https://huggingface.co/BeardedMonster/gemma-270m-translate-it"
+              href="https://huggingface.co/BeardedMonster/gemma-3-270m-translate-it"
               className="hover:text-stone-700 transition-colors"
               target="_blank"
               rel="noopener noreferrer"

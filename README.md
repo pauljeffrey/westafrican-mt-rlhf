@@ -76,7 +76,7 @@ where $r$ is the (optionally z-score normalized) AfriCOMET score, $\pi_{\mathrm{
 
 ### 2.4 Completion-only SFT loss
 
-Translation quality is sensitive to prompt formatting. We train only on tokens **after** `### Translation:\n` using TRL's `DataCollatorForCompletionOnlyLM`, preventing the model from wasting capacity re-learning the instruction template.
+Translation quality is sensitive to prompt formatting. We train only on tokens **after** the inputs, preventing the model from wasting capacity re-learning the instruction template.
 
 ### 2.5 Gemma 3 270M as the base model
 
@@ -98,7 +98,6 @@ The large vocabulary (262K tokens) helps rare and language-specific tokens — r
 **Fully Sharded Data Parallel (FSDP)** shards model parameters, gradients, and optimizer states across GPUs. For Gemma 3 270M, single-GPU full fine-tuning is already feasible; FSDP is primarily used for **throughput scaling** and **larger effective batch sizes**, not because the model fails to fit in memory:
 
 - Gemma 3 270M in bf16: **~540 MB** per full replica.
-- FSDP 4-way shard: **~135 MB** parameters per GPU (+ activations).
 - FSDP integrates natively with HuggingFace `Trainer` / TRL `SFTTrainer`.
 - Optional **tensor parallelism** (`FSDP_TP_SIZE > 1`) splits linear layers across GPUs; auto-wrap uses `Gemma3DecoderLayer`.
 
@@ -180,16 +179,6 @@ python scripts/eval.py \
 # Quick smoke test
 python scripts/eval.py --model-path ./outputs/sft --max-samples 100
 ```
-
-### 4.4 Recommended reporting
-
-For reproducible results, report:
-
-1. Checkpoint path (SFT vs RLHF)
-2. `MAX_TRAIN_SAMPLES` / `MAX_RL_SAMPLES` used
-3. MaFAND validation split (never train on MaFAND)
-4. Per-language BLEU, chrF, and AfriCOMET with macro-average across pairs
-
 ---
 
 ## 5. Related Academic Work
@@ -198,27 +187,21 @@ This project builds on and connects to the following research lines:
 
 ### Low-resource African MT
 
-- **Masakhane** — Pan-African NLP community; MaFAND benchmark and AfriCOMET metric.  
+- **Masakhane**: Pan-African NLP community; MaFAND benchmark and AfriCOMET metric.  
   *Dossou et al., "AfriCOMET: Automatic Evaluation of Machine Translation for African Languages"*
 
 ### Metric-based MT evaluation
 
-- **COMET** — Cross-lingual MT evaluation with pre-trained multilingual encoders.  
+- **COMET**: Cross-lingual MT evaluation with pre-trained multilingual encoders.  
   *Rei et al., "COMET: A Neural Framework for MT Evaluation" (EMNLP 2020)*
-- **AfriCOMET-STL** — COMET fine-tuned on African language pairs; used as RL reward here.
+- **AfriCOMET-STL**: COMET fine-tuned on African language pairs; used as RL reward here.
 
 ### RLHF for language models
 
-- **InstructGPT / RLHF pipeline** — SFT followed by reward-model-guided policy optimization.  
+- **InstructGPT / RLHF pipeline**: SFT followed by reward-model-guided policy optimization.  
   *Ouyang et al., "Training Language Models to Follow Instructions with Human Feedback" (NeurIPS 2022)*
-- **REINFORCE for NLG** — Policy gradient fine-tuning of seq2seq and causal LMs.  
+- **REINFORCE for NLG**: Policy gradient fine-tuning of seq2seq and causal LMs.  
   *Rennie et al., "Self-Critical Sequence Training" (CVPR 2017)* — baseline for RL MT.
-
-### Distributed training
-
-- **FSDP** — Fully Sharded Data Parallel; parameter sharding across GPUs.  
-  *Zhao et al., "PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel" (VLDB 2023)*
-- **Tensor parallelism** — Layer-wise split of weight matrices.
 
 ### Base model
 
@@ -232,7 +215,7 @@ This project builds on and connects to the following research lines:
 ### 6.1 Install
 
 ```bash
-git clone <repo-url> west-african-mt-rlhf
+git clone https://github.com/pauljeffrey/westafrican-mt-rlhf.git
 cd west-african-mt-rlhf
 python -m venv .venv
 source .venv/bin/activate        # Linux/macOS

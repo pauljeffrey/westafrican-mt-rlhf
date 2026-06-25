@@ -1,6 +1,6 @@
 # West African Machine Translation with AfriCOMET-Guided RLHF
 
-**A distributed fine-tuning pipeline for low-resource West African languages using supervised fine-tuning (SFT), reinforcement learning from human feedback (RLHF), and Fully Sharded Data Parallel (FSDP) training. Work is still ongoing.**
+**A machine translation system for West African languages. It teaches a small language model to translate, then improves it using feedback from a quality-scoring model built for African languages. Work is still ongoing.**
 
 | | |
 |---|---|
@@ -16,12 +16,12 @@
 ## Table of Contents
 
 1. [Problem Statement](#1-problem-statement)
-2. [Decision and Design Choices](#2-decision-and-design-choices)
-3. [Architectural Choices](#3-architectural-choices)
+2. [Approach](#2-approach)
+3. [How It Works](#3-how-it-works)
 4. [Evaluation](#4-evaluation)
 5. [Related Academic Work](#5-related-academic-work)
 6. [Quick Start](#6-quick-start)
-7. [Distributed Training (FSDP)](#7-distributed-training-fsdp)
+7. [Multi-GPU Training](#7-multi-gpu-training)
 8. [Project Layout](#8-project-layout)
 9. [Tech Stack](#9-tech-stack)
 
@@ -29,121 +29,112 @@
 
 ## 1. Problem Statement
 
-Machine translation for **West African languages** remains severely under-served relative to high-resource pairs (e.g., en–de, en–fr). Three compounding factors drive this gap:
+Most translation tools work well for languages like English, French, and German — but **West African languages are underserved**. Hausa, Igbo, Yoruba, Wolof, and others have far less training data, and general-purpose AI models often produce weak translations for them.
 
-1. **Data scarcity** — Parallel corpora for Hausa, Igbo, Yoruba, Wolof, and related languages are orders of magnitude smaller than for European or East Asian languages. General-purpose LLMs exhibit high perplexity and suboptimal COMET scores on these pairs despite strong English performance.
+Three challenges make this hard:
 
-2. **Evaluation mismatch** — Standard MT metrics (BLEU, chrF) correlate imperfectly with human judgments on morphologically rich, low-resource African languages. Generic COMET models trained predominantly on European data underperform on these language families.
+1. **Not enough data** — There are far fewer high-quality translation examples for these languages than for major world languages.
+2. **Hard to measure quality** — Standard translation scores do not always reflect how good a translation actually sounds to speakers of the language.
+3. **Training cost** — Improving a model on millions of examples, then refining it with quality feedback, takes real compute — even with a small model.
 
-3. **Compute constraints** — Large-scale SFT over millions of translation examples and RLHF with per-step AfriCOMET scoring remain expensive even with a compact base model. We use **Gemma 3 270M** (~270M parameters, ~540 MB in bf16) so full fine-tuning fits on a single consumer GPU, while **FSDP** scales throughput and effective batch size across multiple devices when needed.
+**What this project does:**
 
-**This project addresses all three concerns** by:
-
-- Fine-tuning **[Gemma 3 270M IT](https://huggingface.co/google/gemma-3-270m-it)** on [`Aletheia-ng/tds-sft`](https://huggingface.co/datasets/Aletheia-ng/tds-sft), a large-scale West African translation SFT dataset (~11M instruction–input–response triples).
-- Applying a lightweight **REINFORCE-style RLHF stage** with **AfriCOMET** — a COMET variant trained specifically on African languages — as the reward signal.
-- Providing **FSDP + optional tensor parallelism** so the same pipeline scales from a single GPU (full fine-tune of 270M) to multi-node clusters without code changes.
-- Shipping a **reproducible evaluation harness** against the [MaFAND](https://huggingface.co/datasets/masakhane/mafand) benchmark and a public demo (Vercel frontend + Modal backend).
-
----
-
-## 2. Decision and Design Choices
-
-### 2.1 Two-stage training over end-to-end RL
-
-We adopt **SFT → RLHF** rather than pure RL from a base checkpoint:
-
-| Rationale | Detail |
-|-----------|--------|
-| Sample efficiency | SFT establishes a reasonable translation prior in ~1 epoch, reducing the RL exploration space. |
-| Stability | Policy-gradient RL from a cold-start base model on low-resource MT may produce high-variance, often degenerate outputs. |
-| Modularity | SFT and RL checkpoints can be evaluated independently; RL can be skipped if compute is limited. |
-
-### 2.2 AfriCOMET as a black-box reward
-
-We use **AfriCOMET** ([`masakhane/africomet-stl`](https://huggingface.co/masakhane/africomet-stl)) as a non-differentiable reward rather than training a separate reward head or using DPO/IPO:
-
-- AfriCOMET is **pre-trained on African language pairs** and correlates better with human judgments than generic COMET-XL on Hausa, Igbo, and Yoruba.
-- A black-box scorer avoids backpropagating through the COMET encoder, simplifying the RL loop and decoupling reward-model versioning from policy training.
-- The trade-off is higher per-step latency (CPU/GPU COMET inference) mitigated by batching and rank-0-only scoring in distributed mode.
-
-### 2.3 REINFORCE + KL penalty over PPO
-
-Full PPO (clipped surrogate objective, value head, GAE) adds significant complexity for marginal gain on a fixed MT dataset. We implement:
-
-$$\mathcal{L} = -\mathbb{E}\left[r \cdot \log \pi_\theta(y|x)\right] + \beta \cdot D_{\mathrm{KL}}(\pi_\theta \| \pi_{\mathrm{ref}})$$
-
-where $r$ is the (optionally z-score normalized) AfriCOMET score, $\pi_{\mathrm{ref}}$ is the frozen SFT checkpoint, and $\beta$ is `RL_KL_COEF`. This is sufficient to nudge the policy toward higher-quality translations while preventing catastrophic forgetting.
-
-### 2.4 Completion-only SFT loss
-
-Translation quality is sensitive to prompt formatting. We train only on tokens **after** the inputs, preventing the model from wasting capacity re-learning the instruction template.
-
-### 2.5 Gemma 3 270M as the base model
-
-We use **[google/gemma-3-270m-it](https://huggingface.co/google/gemma-3-270m-it)** — Google's compact instruction-tuned Gemma 3 variant designed for task-specific fine-tuning:
-
-| Property | Value |
-|----------|-------|
-| Total parameters | ~270M (170M embedding + ~100M transformer blocks) |
-| Architecture | 18 layers, hidden size 640, 262K vocabulary, 32K context |
-| Base (pretrained) | [`google/gemma-3-270m`](https://huggingface.co/google/gemma-3-270m) |
-| bf16 weight memory | ~540 MB |
-| Typical full fine-tune (1× GPU) | ~2–4 GB peak VRAM (batch 4, seq ~768) |
-| Typical inference | < 1 GB VRAM |
-
-The large vocabulary (262K tokens) helps rare and language-specific tokens — relevant for West African scripts and transliterations — while keeping the transformer stack small enough for accessible training hardware.
-
-### 2.6 FSDP over DDP for multi-GPU training
-
-**Fully Sharded Data Parallel (FSDP)** shards model parameters, gradients, and optimizer states across GPUs. For Gemma 3 270M, single-GPU full fine-tuning is already feasible; FSDP is primarily used for **throughput scaling** and **larger effective batch sizes**, not because the model fails to fit in memory:
-
-- Gemma 3 270M in bf16: **~540 MB** per full replica.
-- FSDP integrates natively with HuggingFace `Trainer` / TRL `SFTTrainer`.
-- Optional **tensor parallelism** (`FSDP_TP_SIZE > 1`) splits linear layers across GPUs; auto-wrap uses `Gemma3DecoderLayer`.
-
-### 2.7 Environment-driven configuration
-
-All hyperparameters live in `.env` → `src/config.py`. No YAML loader in the training path — single source of truth, easy to override in CI/cluster job definitions.
+- Trains **[Gemma 3 270M](https://huggingface.co/google/gemma-3-270m-it)**, a compact Google language model, on [`Aletheia-ng/tds-sft`](https://huggingface.co/datasets/Aletheia-ng/tds-sft) (~11M translation examples).
+- Runs a second training stage that **rewards better translations** using **AfriCOMET**, a quality scorer built for African languages.
+- Supports **single-GPU or multi-GPU training** so the same pipeline works on a laptop GPU or a small cluster.
+- Includes **benchmarking** on [MaFAND](https://huggingface.co/datasets/masakhane/mafand) and a **live demo** (web UI on Vercel, API on Modal).
 
 ---
 
-## 3. Architectural Choices
+## 2. Approach
 
-### 3.1 System overview
+### 2.1 Two-step training
+
+Instead of jumping straight to reinforcement learning, we train in two stages:
+
+| Step | What it does | Why |
+|------|--------------|-----|
+| **Step 1 — Supervised fine-tuning (SFT)** | Shows the model many example translations and teaches it to follow a fixed prompt format. | Gives the model a solid starting point before optimization. |
+| **Step 2 — RLHF** | Generates translations, scores them with AfriCOMET, and nudges the model toward higher-scoring outputs. | Improves quality beyond what examples alone can teach. |
+
+Each stage can be run and evaluated on its own. Step 2 is optional if compute is limited.
+
+### 2.2 AfriCOMET as the quality judge
+
+During step 2, **AfriCOMET** ([`masakhane/africomet-stl`](https://huggingface.co/masakhane/africomet-stl)) rates each translation. The model is updated to produce outputs that score higher.
+
+- AfriCOMET is **trained on African language pairs**, so it is a better judge than generic translation scorers for this use case.
+- It is used as an **external scorer** — we read its score and update the model, without rebuilding the scorer itself.
+- The trade-off: scoring adds time per training step, which we reduce via batching.
+
+### 2.3 Keeping the model stable
+
+During step 2, the model is penalized if it drifts too far from the step-1 checkpoint. That prevents it from chasing high scores in ways that break basic translation ability.
+
+### 2.4 Focused learning during step 1
+
+The model is trained only on the **translation output**, not on repeating the instruction template. That keeps training focused on actual translation quality.
+
+### 2.5 Why Gemma 3 270M?
+
+We use **[google/gemma-3-270m-it](https://huggingface.co/google/gemma-3-270m-it)** — a small, instruction-ready model from Google:
+
+| | |
+|---|---|
+| Size | ~270M parameters (~540 MB) |
+| Context | Up to 32K tokens |
+| Vocabulary | 262K tokens (helps rare and language-specific words) |
+| Hardware | Full training fits on a single consumer GPU (~2–4 GB VRAM) |
+| Pretrained base | [`google/gemma-3-270m`](https://huggingface.co/google/gemma-3-270m) |
+
+Small enough to train affordably; large enough to learn useful translation patterns.
+
+### 2.6 Multi-GPU support
+
+Training can run on **one GPU** or scale to **multiple GPUs** using PyTorch **DDP** (split work across copies of the model) or **FSDP** (split the model itself across GPUs). For this model size, multi-GPU is mainly about **training faster**, not fitting the model in memory.
+
+### 2.7 Configuration
+
+All settings live in a single `.env` file, loaded by `src/config.py`. No hidden config scattered across the codebase.
+
+---
+
+## 3. How It Works
+
+### 3.1 Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Training Pipeline                            │
-├─────────────────────────────────────────────────────────────────────┤
-│  Aletheia-ng/tds-sft  ──►  SFT (TRL + FSDP)  ──►  outputs/sft/   │
-│                                      │                              │
-│                                      ▼                              │
-│              AfriCOMET reward ◄──  RLHF (REINFORCE + FSDP)         │
-│                                      │                              │
-│                                      ▼                              │
-│                          BeardedMonster/gemma-3-270m-translate-it   │
-└─────────────────────────────────────────────────────────────────────┘
-         │                                    │
-         ▼                                    ▼
-  scripts/eval.py                      app/backend/ (Modal GPU)
-  masakhane/mafand                     app/frontend/ (Vercel UI)
-  BLEU · chrF · AfriCOMET
+Training data (tds-sft)
+        │
+        ▼
+   Step 1: SFT  ──►  checkpoint saved
+        │
+        ▼
+   Step 2: RLHF  ◄──  AfriCOMET scores each translation
+        │
+        ▼
+   Published model (Hugging Face)
+        │
+        ├─►  Benchmark (MaFAND)
+        └─►  Live demo (web app + API)
 ```
 
-### 3.2 Module responsibilities
+### 3.2 Code structure
 
-| Module | Responsibility |
-|--------|----------------|
-| `src/config.py` | Frozen `Settings` dataclass from `.env` |
-| `src/data.py` | Stream and format HF dataset rows for SFT/RL |
-| `src/prompts.py` | Shared prompt template + output extraction |
-| `src/model_utils.py` | Tokenizer/model loading; defers device placement under FSDP |
-| `src/distributed.py` | **FSDP wrap, tensor parallel, checkpoint gather, broadcast** |
-| `src/sft_train.py` | TRL `SFTTrainer` with optional FSDP config |
-| `src/rlhf_train.py` | Custom RL loop with FSDP-wrapped policy + reference |
-| `src/reward.py` | AfriCOMET batch scorer |
-| `src/inference.py` | Single-sentence greedy decode |
-| `scripts/` | Thin CLI entry points (`run_sft`, `run_rlhf`, `eval`, `translate`) |
+| Folder / file | What it does |
+|---------------|--------------|
+| `src/config.py` | Reads settings from `.env` |
+| `src/data.py` | Loads and formats training data |
+| `src/prompts.py` | Shared prompt format for training and inference |
+| `src/model_utils.py` | Loads the language model and tokenizer |
+| `src/distributed.py` | Multi-GPU setup (DDP and FSDP) |
+| `src/sft_train.py` | Step 1 training loop |
+| `src/rlhf_train.py` | Step 2 training loop |
+| `src/reward.py` | Calls AfriCOMET to score translations |
+| `src/inference.py` | Runs translation on a single sentence |
+| `scripts/` | Command-line entry points to train, evaluate, and translate |
+| `app/backend/` | GPU API for the live demo (Modal) |
+| `app/frontend/` | Web UI for the live demo (Vercel) |
 
 ---
 
@@ -151,17 +142,17 @@ All hyperparameters live in `.env` → `src/config.py`. No YAML loader in the tr
 
 ### 4.1 Benchmark
 
-We evaluate on **[MaFAND](https://huggingface.co/datasets/masakhane/mafand)** (`validation` split) — a multi-way parallel corpus covering English ↔ African languages with professional translations.
+We evaluate on **[MaFAND](https://huggingface.co/datasets/masakhane/mafand)** — a dataset of professional English ↔ African language translations.
 
 Default language pairs: `en-hau`, `en-ibo`, `en-yor`, `en-wol`, `en-ewe`, `en-fon`, `en-twi`.
 
 ### 4.2 Metrics
 
-| Metric | Purpose |
-|--------|---------|
-| **BLEU** | N-gram overlap with reference (standard MT baseline) |
-| **chrF** | Character n-gram F-score; more robust for morphologically rich languages |
-| **AfriCOMET** | Learned metric trained on African languages; optional (`--use-africomet`) |
+| Metric | What it measures |
+|--------|------------------|
+| **BLEU** | How closely the output matches the reference wording |
+| **chrF** | Character-level similarity (better for languages with rich word forms) |
+| **AfriCOMET** | Learned quality score for African languages (optional) |
 
 ### 4.3 Running evaluation
 
@@ -179,6 +170,7 @@ python scripts/eval.py \
 # Quick smoke test
 python scripts/eval.py --model-path ./outputs/sft --max-samples 100
 ```
+
 ---
 
 ## 5. Related Academic Work
@@ -187,20 +179,20 @@ This project builds on and connects to the following research lines:
 
 ### Low-resource African MT
 
-- **Masakhane**: Pan-African NLP community; MaFAND benchmark and AfriCOMET metric.  
+- **Masakhane** — Pan-African NLP community; MaFAND benchmark and AfriCOMET metric.  
   *Dossou et al., "AfriCOMET: Automatic Evaluation of Machine Translation for African Languages"*
 
 ### Metric-based MT evaluation
 
-- **COMET**: Cross-lingual MT evaluation with pre-trained multilingual encoders.  
+- **COMET** — Cross-lingual MT evaluation with pre-trained multilingual encoders.  
   *Rei et al., "COMET: A Neural Framework for MT Evaluation" (EMNLP 2020)*
-- **AfriCOMET-STL**: COMET fine-tuned on African language pairs; used as RL reward here.
+- **AfriCOMET-STL** — COMET fine-tuned on African language pairs; used as RL reward here.
 
 ### RLHF for language models
 
-- **InstructGPT / RLHF pipeline**: SFT followed by reward-model-guided policy optimization.  
+- **InstructGPT / RLHF pipeline** — SFT followed by reward-model-guided policy optimization.  
   *Ouyang et al., "Training Language Models to Follow Instructions with Human Feedback" (NeurIPS 2022)*
-- **REINFORCE for NLG**: Policy gradient fine-tuning of seq2seq and causal LMs.  
+- **REINFORCE for NLG** — Policy gradient fine-tuning of seq2seq and causal LMs.  
   *Rennie et al., "Self-Critical Sequence Training" (CVPR 2017)* — baseline for RL MT.
 
 ### Base model
@@ -243,31 +235,37 @@ python scripts/translate.py \
 
 #### Multi-GPU training
 
+Set `DIST_STRATEGY=ddp` or `DIST_STRATEGY=fsdp` in `.env`, then:
+
 ```bash
-# 2-GPU data parallel (throughput scaling; 270M fits on 1 GPU)
+# 2 GPUs — DDP
 torchrun --nproc_per_node=2 scripts/run_sft.py
 torchrun --nproc_per_node=2 scripts/run_rlhf.py
 
-# 4-GPU FSDP full shard (larger effective batch)
+# 4 GPUs — FSDP
 torchrun --nproc_per_node=4 scripts/run_sft.py
 torchrun --nproc_per_node=4 scripts/run_rlhf.py
-
-# 8-GPU: 4 data-parallel groups × 2-way tensor parallel
-# FSDP_TP_SIZE=2 in .env
-torchrun --nproc_per_node=8 scripts/run_sft.py
 ```
 
 ---
 
-## 7. Distributed Training (FSDP)
+## 7. Multi-GPU Training
 
-### 7.1 Sharding strategies
+When using more than one GPU, set `DIST_STRATEGY` in `.env`:
 
-| Strategy | Behavior | When to use |
-|----------|----------|-------------|
-| `FULL_SHARD` | Shard params, grads, optimizer states | Default; best memory efficiency |
-| `HYBRID_SHARD` | Full shard intra-node, replicate inter-node | Multi-node clusters |
-| `SHARD_GRAD_OP` | Shard grads/optimizer only | When params fit per-GPU but grads don't |
+| Strategy | Plain English | Best for |
+|----------|---------------|----------|
+| `none` | Single GPU, no distribution | Local development |
+| `ddp` | Each GPU holds a full copy of the model; data is split across GPUs | Faster training when the model fits on one GPU |
+| `fsdp` | The model is split across GPUs | Larger batch sizes or very tight GPU memory |
+
+FSDP sharding options (`FSDP_SHARDING` in `.env`):
+
+| Option | What it does |
+|--------|--------------|
+| `FULL_SHARD` | Split model weights, gradients, and optimizer state (default) |
+| `HYBRID_SHARD` | Full split within a machine, replicate across machines |
+| `SHARD_GRAD_OP` | Keep full weights on each GPU; split only gradients and optimizer state |
 
 ---
 
@@ -278,38 +276,24 @@ west-african-mt-rlhf/
 ├── README.md
 ├── requirements.txt
 ├── .env.example
-├── configs/default.yaml          # reference defaults (informational)
-├── scripts/
-│   ├── run_sft.py                # SFT entry point (+ distributed init)
-│   ├── run_rlhf.py               # RLHF entry point (+ distributed init)
-│   ├── translate.py              # single-sentence inference CLI
-│   └── eval.py                   # MaFAND benchmark evaluation
-├── src/
-│   ├── config.py                 # Settings from .env
-│   ├── data.py                   # dataset streaming + formatting
-│   ├── prompts.py                # prompt template + extraction
-│   ├── model_utils.py            # model/tokenizer loading
-│   ├── distributed.py            # FSDP + TP + checkpoint I/O
-│   ├── sft_train.py              # SFT training
-│   ├── rlhf_train.py             # RLHF training
-│   ├── reward.py                 # AfriCOMET wrapper
-│   └── inference.py              # generation helper
-├── app/
-│   ├── backend/                  # Modal serverless GPU API
-│   └── frontend/                 # Next.js demo (Vercel)
+├── configs/default.yaml
+├── scripts/          # CLI: train, evaluate, translate
+├── src/              # Core training and inference code
+└── app/
+    ├── backend/      # Modal GPU API
+    └── frontend/     # Vercel web demo
 ```
 
 ---
 
 ## 9. Tech Stack
 
-| Library | Role |
-|---------|------|
-| PyTorch ≥ 2.1 | Training, FSDP, generation |
-| Transformers ≥ 4.50 | Causal LM (Gemma 3), tokenizer, TP integration |
-| TRL ≥ 0.9.6 | `SFTTrainer`, completion-only collator |
-| PEFT ≥ 0.12 | Optional LoRA |
-| unbabel-comet ≥ 2.2 | AfriCOMET reward |
-| sacrebleu ≥ 2.4 | BLEU / chrF evaluation |
-| Datasets ≥ 2.19 | HF streaming |
-| Accelerate ≥ 0.33 | Mixed precision, FSDP trainer backend |
+| Tool | Role |
+|------|------|
+| **PyTorch** | Model training and inference |
+| **Hugging Face Transformers** | Loads Gemma 3 and the tokenizer |
+| **AfriCOMET (unbabel-comet)** | Scores translation quality during RLHF |
+| **Hugging Face Datasets** | Streams training and benchmark data |
+| **sacrebleu** | BLEU and chrF evaluation metrics |
+| **Modal** | Hosts the GPU API for the live demo |
+| **Vercel + Next.js** | Hosts the web demo |

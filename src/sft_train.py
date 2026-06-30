@@ -46,16 +46,15 @@ class SFTCollator:
             batch_labels.append(label)
 
         return {
-            "input_ids": torch.tensor(batch_input_ids),  # (batch, max_len) long
-            "attention_mask": torch.tensor(batch_attention_mask),  # (batch, max_len) long
-            "labels": torch.tensor(batch_labels),  # (batch, max_len) long
+            "input_ids": torch.tensor(batch_input_ids),
+            "attention_mask": torch.tensor(batch_attention_mask),
+            "labels": torch.tensor(batch_labels),
         }
 
 
 def train_sft() -> str:
     os.makedirs(settings.sft_output_dir, exist_ok=True)
     ctx = dist_context()
-    max_length = settings.max_prompt_len + settings.max_target_len
     use_bf16 = settings.sft_bf16 and torch.cuda.is_available()
 
     if ctx.is_main:

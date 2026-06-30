@@ -3,7 +3,7 @@ import math
 import os
 
 import torch
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from tqdm import tqdm
 from transformers import get_linear_schedule_with_warmup
 
@@ -23,30 +23,33 @@ from src.model_utils import load_causal_lm, load_tokenizer
 logger = logging.getLogger(__name__)
 
 
-def _collate(batch: list[dict]) -> dict:
-    return {"text": [r["text"] for r in batch], "prompt": [r["prompt"] for r in batch]}
+class SFTCollator:
+    def __init__(self, pad_token_id) -> None:
+        self.pad_token_id = pad_token_id
 
+    def __call__(self, batch):
+        input_ids = [row["input_ids"] for row in batch]
+        labels = [row["labels"] for row in batch]
 
-def _prepare_batch(batch: dict, tokenizer, device: torch.device, max_length: int):
-    enc = tokenizer(
-        batch["text"],
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-        return_tensors="pt",
-    )
-    labels = enc["input_ids"].clone()
-    for i, prompt in enumerate(batch["prompt"]):
-        text_ids = tokenizer(batch["text"][i], add_special_tokens=True)["input_ids"]
-        prompt_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
-        prompt_len = len(prompt_ids)
-        if text_ids[:prompt_len] == prompt_ids:
-            labels[i, :prompt_len] = -100
-        else:
-            prompt_len = len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
-            labels[i, :prompt_len] = -100
-    labels[enc["attention_mask"] == 0] = -100
-    return {k: v.to(device) for k, v in enc.items()}, labels.to(device)
+        max_len = max(len(x) for x in input_ids)
+
+        batch_input_ids, batch_attention_mask, batch_labels = [], [], []
+
+        for row in zip(input_ids, labels):
+            true_len, pad_len = len(row[0]), (max_len - len(row[0]))
+            input_id = row[0] + ([self.pad_token_id] * pad_len)
+            label = row[1] + [-100] * (max_len - len(row[1]))
+            attention_mask = [1] * true_len + [0] * pad_len
+
+            batch_input_ids.append(input_id)
+            batch_attention_mask.append(attention_mask)
+            batch_labels.append(label)
+
+        return {
+            "input_ids": torch.tensor(batch_input_ids),  # (batch, max_len) long
+            "attention_mask": torch.tensor(batch_attention_mask),  # (batch, max_len) long
+            "labels": torch.tensor(batch_labels),  # (batch, max_len) long
+        }
 
 
 def train_sft() -> str:
@@ -59,16 +62,19 @@ def train_sft() -> str:
         logger.info(
             "Loading dataset %s (max %d samples)", settings.dataset_id, settings.max_train_samples
         )
-    dataset = prepare_sft_dataset()
+    tokenizer = load_tokenizer()
+    dataset = prepare_sft_dataset(tokenizer)
+    pad_token_id = (
+        tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    )
     dataloader = distributed_dataloader(
         dataset,
         settings.sft_per_device_batch_size,
         shuffle=True,
         drop_last=True,
-        collate_fn=_collate,
+        collate_fn=SFTCollator(pad_token_id),
     )
 
-    tokenizer = load_tokenizer()
     model = load_causal_lm()
     model = wrap_model(
         model,
@@ -110,11 +116,9 @@ def train_sft() -> str:
         optimizer.zero_grad()
 
         for step, raw_batch in enumerate(progress):
-            batch = _collate(raw_batch)
-            inputs, labels = _prepare_batch(batch, tokenizer, ctx.device, max_length)
-
-            with autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
-                loss = model(**inputs, labels=labels).loss / settings.sft_grad_accum
+            batch = {k: v.to(ctx.device) for k, v in raw_batch.items()}
+            with autocast(device_type=ctx.device.type, dtype=torch.bfloat16, enabled=use_bf16):
+                loss = model(**batch).loss / settings.sft_grad_accum
 
             loss.backward()
 
@@ -126,7 +130,9 @@ def train_sft() -> str:
                 global_step += 1
 
                 if ctx.is_main and global_step % settings.sft_logging_steps == 0:
-                    progress.set_postfix(loss=float(loss.detach()) * settings.sft_grad_accum, step=global_step)
+                    progress.set_postfix(
+                        loss=float(loss.detach()) * settings.sft_grad_accum, step=global_step
+                    )
 
     save_model(model, settings.sft_output_dir, tokenizer)
     if ctx.is_main:

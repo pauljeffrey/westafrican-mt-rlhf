@@ -1,7 +1,7 @@
 from datasets import Dataset, load_dataset
 
 from src.config import settings
-from src.prompts import RESPONSE_TEMPLATE, build_prompt
+from src.prompts import build_prompt
 
 
 def _hf_token_kwargs() -> dict:
@@ -76,7 +76,3 @@ def prepare_sft_dataset(tokenizer, max_samples: int | None = None) -> Dataset:
 def prepare_rl_dataset(max_samples: int | None = None) -> Dataset:
     ds = load_tds(max_samples=max_samples or settings.max_rl_samples, streaming=True)
     return ds.map(format_rl_row, remove_columns=ds.column_names)
-
-
-def completion_only_template() -> str:
-    return RESPONSE_TEMPLATE

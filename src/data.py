@@ -44,9 +44,8 @@ def format_sft_row(row: dict, tokenizer) -> dict:
 
     prompt_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
     completion_ids = tokenizer(completion, add_special_tokens=False)["input_ids"]
-    completion_ids = (
-        completion_ids + [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
-    )
+    if tokenizer.eos_token_id is not None:
+        completion_ids = completion_ids + [tokenizer.eos_token_id]
 
     input_ids = prompt_ids + completion_ids
     labels = [-100] * len(prompt_ids) + completion_ids
